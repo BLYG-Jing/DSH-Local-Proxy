@@ -1,0 +1,14 @@
+{
+  "name": "dsh-local-proxy",
+  "version": "1.1.1",
+  "private": true,
+  "description": "Local reverse proxy for DeepSeek Harness",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

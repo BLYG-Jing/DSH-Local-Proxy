@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>DSH Local Proxy</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; max-width: 760px; margin: 48px auto; padding: 0 20px; color: #202124; }
+    code { background: #f1f3f4; padding: 2px 6px; border-radius: 4px; }
+    .ok { color: #137333; }
+  </style>
+</head>
+<body>
+  <h1>DSH Local Proxy</h1>
+  <p class="ok">代理服务已启动。</p>
+  <p>主应用入口：<a href="/">http://127.0.0.1:18082/</a></p>
+  <p>本地诊断页：<code>/__local/</code></p>
+  <p>所有主应用请求由本机服务端转发到 <code>127.0.0.1:18080</code>，不会把远程访问者地址转发给上游。</p>
+</body>
+</html>

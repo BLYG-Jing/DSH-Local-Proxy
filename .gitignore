@@ -1,0 +1,24 @@
+node_modules/
+
+# Local configuration and credentials
+.env
+.env.*
+*.env
+!.env.example
+!**/.env.example
+*.secret
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+secrets/
+credentials.json
+.npmrc
+
+# Generated output
+dist/
+build/
+coverage/
+*.log
+.DS_Store
