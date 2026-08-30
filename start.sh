@@ -35,6 +35,7 @@ upstream_port="$(read_port 'Harness Web 上游端口：')"
 read -r -s -p '代理登录密码：' auth_password || fail '读取密码失败。'
 printf '\n'
 [[ -n "$auth_password" ]] || fail '密码不能为空。'
+auth_password_b64="$(printf '%s' "$auth_password" | base64 | tr -d '\n')"
 
 config_file="${DSH_ENV_FILE:-.env}"
 umask 077
@@ -45,17 +46,22 @@ LISTEN_PORT=$listen_port
 UPSTREAM_HOST=127.0.0.1
 UPSTREAM_PORT=$upstream_port
 HISTORY_READ_TIMEOUT_MS=120000
-AUTH_PASSWORD=$auth_password
+WEBSOCKET_HANDSHAKE_TIMEOUT_MS=10000
+UPSTREAM_STATE_TTL_MS=60000
+AUTH_PASSWORD_B64=$auth_password_b64
 EOF
 chmod 600 "$config_file"
 
 printf '配置已保存到 %s。\n' "$config_file"
 printf '启动代理：http://127.0.0.1:%s/\n' "$listen_port"
+printf 'Harness 可以尚未启动；代理不会启动、停止或重启 Harness。\n'
 exec env \
   LISTEN_HOST=127.0.0.1 \
   LISTEN_PORT="$listen_port" \
   UPSTREAM_HOST=127.0.0.1 \
   UPSTREAM_PORT="$upstream_port" \
   HISTORY_READ_TIMEOUT_MS=120000 \
-  AUTH_PASSWORD="$auth_password" \
+  WEBSOCKET_HANDSHAKE_TIMEOUT_MS=10000 \
+  UPSTREAM_STATE_TTL_MS=60000 \
+  AUTH_PASSWORD_B64="$auth_password_b64" \
   node server.js

@@ -14,7 +14,7 @@
 
 - Linux
 - Node.js 18 或更高版本
-- DeepSeek Harness Web 已在本机运行
+- DeepSeek Harness Web 可在本机独立运行（启动代理时可以尚未启动）
 
 ### 一键启动
 
@@ -29,7 +29,7 @@
 | 填写内容 | 解释 |
 | --- | --- |
 | 代理监听端口 | 新的 DSH Web 访问入口所使用的端口 |
-| Harness Web 上游端口 | 已经运行的 DeepSeek Harness Web 所使用的端口 |
+| Harness Web 上游端口 | Harness Web 独立运行时使用的端口；此时可以尚未启动 |
 | 登录密码 | 访问新代理入口时需要输入的密码 |
 
 配置会保存到本地 `.env` 文件。代理地址为：
@@ -44,6 +44,14 @@ http://127.0.0.1:你输入的代理监听端口/
 chmod +x start.sh
 ./start.sh
 ```
+
+### 与 Harness 独立运行
+
+代理可以在 Harness 尚未启动时先启动。Harness 不可用或重启期间，代理仍保持监听并返回明确的临时不可用响应；Harness 恢复后，新请求会自动恢复转发。
+
+**边界声明：本项目永远不会启动、停止、重启、发送信号或以其他方式管理 Harness 进程。** 用户需要自行管理 Harness 的生命周期。
+
+如果希望关闭终端后仍由用户服务独立托管代理，可使用 [`docs/systemd-user.md`](docs/systemd-user.md) 中的 `systemd --user` 方案。该服务只管理代理自身，与任何 Harness 服务均无依赖关系。
 
 ## 3. 免责与安全声明（安全第一）
 

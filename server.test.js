@@ -9,13 +9,21 @@ const {
   AUTH_COOKIE, createProxyServer, patchConnectionPlugin, preferredEncoding, isImmutableStaticRequest, bootPluginUrls,
 } = require('./server');
 
-function listen(server) {
+function listen(server, port = 0) {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(port, '127.0.0.1', () => {
       server.off('error', reject);
       resolve(server.address().port);
     });
+  });
+}
+
+function unusedPort() {
+  const reservation = net.createServer();
+  return listen(reservation).then(async (port) => {
+    await close(reservation);
+    return port;
   });
 }
 
@@ -132,6 +140,12 @@ function openWebSocketTunnel(port, cookie, path = '/api/events.mux') {
     socket.on('data', onData);
     socket.once('error', reject);
   });
+}
+
+function webSocketAccept(key) {
+  return require('node:crypto').createHash('sha1')
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest('base64');
 }
 
 function websocketAttempt(port, cookie = '') {
@@ -348,8 +362,197 @@ test('history reads use the weak-network timeout while ordinary API calls still 
   assert.deepEqual(JSON.parse(history.body), { ok: true });
 
   const ordinary = await request(proxyPort, '/api/host.describe', { method: 'POST', headers: { cookie } });
-  assert.equal(ordinary.status, 502);
-  assert.match(ordinary.body, /upstream timeout/);
+  assert.equal(ordinary.status, 503);
+  assert.deepEqual(JSON.parse(ordinary.body), {
+    error: { code: 'UPSTREAM_TIMEOUT', message: 'Harness is unavailable', retryable: true },
+  });
+});
+
+test('proxy stays alive before Harness starts and recovers on the same upstream port', async (t) => {
+  const upstreamPort = await unusedPort();
+  let now = 1000;
+  const proxy = createProxyServer({
+    upstreamHost: '127.0.0.1', upstreamPort, password: 'unit-test-password',
+    sessionToken: 'unit-test-session-token', upstreamTimeoutMs: 100,
+    webSocketHandshakeTimeoutMs: 100, upstreamStateTtlMs: 1000, now: () => now,
+  });
+  const proxyPort = await listen(proxy);
+  let upstream;
+  t.after(async () => {
+    await close(proxy);
+    if (upstream?.listening) await close(upstream);
+  });
+  const cookie = `${AUTH_COOKIE}=unit-test-session-token`;
+
+  const initialLive = await request(proxyPort, '/__health/live');
+  assert.equal(initialLive.status, 200);
+  assert.deepEqual(JSON.parse(initialLive.body), { status: 'ok' });
+  const liveHead = await request(proxyPort, '/__health/live', { method: 'HEAD' });
+  assert.equal(liveHead.status, 200);
+  assert.equal(liveHead.rawBody.length, 0);
+  const initialReady = await request(proxyPort, '/__health/ready');
+  assert.equal(initialReady.status, 503);
+  assert.deepEqual(JSON.parse(initialReady.body), { status: 'unknown' });
+
+  const navigation = await request(proxyPort, '/', {
+    headers: { cookie, accept: 'text/html', 'sec-fetch-mode': 'navigate' },
+  });
+  assert.equal(navigation.status, 503);
+  assert.match(navigation.headers['content-type'], /^text\/html/);
+  assert.match(navigation.body, /代理仍在独立运行/);
+  assert.doesNotMatch(navigation.body, /127\.0\.0\.1|ECONNREFUSED/);
+
+  const api = await request(proxyPort, '/api/host.describe', {
+    method: 'POST', headers: { cookie, accept: 'application/json' },
+  });
+  assert.equal(api.status, 503);
+  assert.deepEqual(JSON.parse(api.body), {
+    error: { code: 'UPSTREAM_UNAVAILABLE', message: 'Harness is unavailable', retryable: true },
+  });
+  assert.doesNotMatch(api.body, /127\.0\.0\.1|ECONNREFUSED/);
+
+  const failedReady = await request(proxyPort, '/__health/ready');
+  assert.equal(failedReady.status, 503);
+  assert.deepEqual(JSON.parse(failedReady.body), { status: 'unavailable' });
+  const failedWebSocketResponse = await websocketAttempt(proxyPort, cookie);
+  assert.match(failedWebSocketResponse, /^HTTP\/1\.1 503 Service Unavailable/);
+  assert.equal((await request(proxyPort, '/__health/live')).status, 200);
+
+  upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': req.url === '/' ? 'text/html' : 'application/json' });
+    res.end(req.url === '/' ? '<html><head></head><body>recovered</body></html>' : '{"ok":true}');
+  });
+  upstream.on('upgrade', (req, socket) => {
+    const accept = webSocketAccept(req.headers['sec-websocket-key']);
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    socket.on('error', () => {});
+    socket.on('end', () => socket.destroy());
+  });
+  await listen(upstream, upstreamPort);
+
+  const recovered = await request(proxyPort, '/api/host.describe', {
+    method: 'POST', headers: { cookie, accept: 'application/json' },
+  });
+  assert.equal(recovered.status, 200);
+  assert.deepEqual(JSON.parse(recovered.body), { ok: true });
+  assert.equal((await request(proxyPort, '/__health/ready')).status, 200);
+
+  const recoveredWebSocket = await openWebSocketTunnel(proxyPort, cookie);
+  assert.match(recoveredWebSocket.response, /^HTTP\/1\.1 101 Switching Protocols/);
+  recoveredWebSocket.socket.destroy();
+
+  now += 1001;
+  const staleReady = await request(proxyPort, '/__health/ready');
+  assert.equal(staleReady.status, 503);
+  assert.deepEqual(JSON.parse(staleReady.body), { status: 'unknown' });
+});
+
+test('invalid WebSocket upstream responses are rejected without opening a raw tunnel', async (t) => {
+  const upstream = http.createServer();
+  upstream.on('upgrade', (req, socket) => {
+    socket.end('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nno');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer({
+    upstreamHost: '127.0.0.1', upstreamPort, password: 'unit-test-password',
+    sessionToken: 'unit-test-session-token', webSocketHandshakeTimeoutMs: 200,
+  });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+  const cookie = `${AUTH_COOKIE}=unit-test-session-token`;
+
+  const response = await websocketAttempt(proxyPort, cookie);
+  assert.match(response, /^HTTP\/1\.1 503 Service Unavailable/);
+  assert.doesNotMatch(response, /^HTTP\/1\.1 200 OK/);
+  const ready = await request(proxyPort, '/__health/ready');
+  assert.equal(ready.status, 503);
+  assert.deepEqual(JSON.parse(ready.body), { status: 'unavailable' });
+});
+
+test('upstream stream resets are contained and disconnected clients cancel upstream work', async (t) => {
+  let slowRequestClosed;
+  const upstream = http.createServer((req, res) => {
+    if (req.url === '/reset') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.write('partial');
+      return res.socket.destroy();
+    }
+    if (req.url === '/plugins/events') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(': connected\n\n');
+      return res.socket.destroy();
+    }
+    if (req.url === '/slow') {
+      slowRequestClosed = new Promise((resolve) => req.once('close', resolve));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer({
+    upstreamHost: '127.0.0.1', upstreamPort, password: 'unit-test-password',
+    sessionToken: 'unit-test-session-token', upstreamTimeoutMs: 1000,
+  });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+  const cookie = `${AUTH_COOKIE}=unit-test-session-token`;
+
+  const resetOutcome = await request(proxyPort, '/reset', { headers: { cookie } })
+    .then((value) => ({ value }), (error) => ({ error }));
+  assert.ok(resetOutcome.error || resetOutcome.value.status === 503 || resetOutcome.value.body === 'partial');
+  const eventOutcome = await request(proxyPort, '/plugins/events', { headers: { cookie } })
+    .then((value) => ({ value }), (error) => ({ error }));
+  assert.ok(eventOutcome.error || eventOutcome.value.status === 503 || eventOutcome.value.body.includes(': connected'));
+  assert.equal((await request(proxyPort, '/__health/live')).status, 200);
+  assert.equal((await request(proxyPort, '/__health/ready')).status, 503);
+
+  const client = http.get({
+    host: '127.0.0.1', port: proxyPort, path: '/slow', headers: { cookie },
+  });
+  client.on('error', () => {});
+  for (let attempts = 0; attempts < 50 && !slowRequestClosed; attempts += 1) await delay(5);
+  assert.ok(slowRequestClosed, 'slow upstream request should have started');
+  client.destroy();
+  await Promise.race([
+    slowRequestClosed,
+    delay(1000).then(() => { throw new Error('downstream disconnect did not cancel upstream request'); }),
+  ]);
+  assert.equal((await request(proxyPort, '/__health/live')).status, 200);
+});
+
+test('generic proxy core contains no Harness protocol knowledge', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const coreFiles = fs.readdirSync(path.join(__dirname, 'lib')).filter((name) => name.endsWith('.js'))
+    .map((name) => path.join(__dirname, 'lib', name));
+  for (const file of coreFiles) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.doesNotMatch(source, /__DSH_BOOT__|WebApiClient|dsh-client-connection/, file);
+    assert.doesNotMatch(source, /\/api\/session\.(?:list|history)|\/plugins\/events/, file);
+  }
+});
+
+test('production proxy contains no Harness process lifecycle management', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const productionFiles = [
+    path.join(__dirname, 'server.js'),
+    ...fs.readdirSync(path.join(__dirname, 'lib')).filter((name) => name.endsWith('.js'))
+      .map((name) => path.join(__dirname, 'lib', name)),
+    ...fs.readdirSync(path.join(__dirname, 'adapters')).filter((name) => name.endsWith('.js'))
+      .map((name) => path.join(__dirname, 'adapters', name)),
+  ];
+  for (const file of productionFiles) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.doesNotMatch(source, /require\(['"](?:node:)?child_process['"]\)/, file);
+    assert.doesNotMatch(source, /process\.kill\s*\(/, file);
+    assert.doesNotMatch(source, /(?:systemctl|pkill|killall|dsh\s+(?:web|stop|start|restart))/i, file);
+  }
+
+  const service = fs.readFileSync(path.join(__dirname, 'packaging/systemd/dsh-local-proxy.service'), 'utf8');
+  const activeLines = service.split('\n').filter((line) => !/^\s*(?:#|$)/.test(line));
+  assert.doesNotMatch(activeLines.join('\n'), /^(?:Requires|BindsTo|PartOf|ExecStartPre|ExecStop)=/m);
+  assert.doesNotMatch(activeLines.join('\n'), /Harness/i);
 });
 
 test('authentication blocks all upstream HTTP and WebSocket access until login', async (t) => {
@@ -383,6 +586,7 @@ test('authentication blocks all upstream HTTP and WebSocket access until login',
       'HTTP/1.1 101 Switching Protocols',
       'Upgrade: websocket',
       'Connection: Upgrade',
+      `Sec-WebSocket-Accept: ${webSocketAccept(req.headers['sec-websocket-key'])}`,
       '', '',
     ].join('\r\n'));
   });

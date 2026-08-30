@@ -1,0 +1,35 @@
+[Unit]
+Description=DSH Local Proxy
+Documentation=file://%h/.local/lib/dsh-local-proxy/docs/systemd-user.md
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/lib/dsh-local-proxy
+EnvironmentFile=%h/.config/dsh-local-proxy/proxy.env
+ExecStart=/usr/bin/env node server.js
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+# Lifecycle boundary: this unit deliberately has no Requires=, BindsTo=,
+# PartOf=, ExecStartPre=, ExecStop=, or other relationship to Harness.
+
+[Install]
+WantedBy=default.target

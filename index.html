@@ -14,6 +14,8 @@
   <p class="ok">代理服务已启动。</p>
   <p>主应用入口：<a href="/">http://127.0.0.1:18082/</a></p>
   <p>本地诊断页：<code>/__local/</code></p>
-  <p>所有主应用请求由本机服务端转发到 <code>127.0.0.1:18080</code>，不会把远程访问者地址转发给上游。</p>
+  <p>所有主应用请求由本机服务端转发到配置的上游，不会把远程访问者地址转发给上游。</p>
+  <p>Harness 暂不可用时代理仍会继续运行；代理不会启动、停止或重启 Harness。</p>
+  <p>健康检查：<a href="/__health/live"><code>/__health/live</code></a> · <a href="/__health/ready"><code>/__health/ready</code></a></p>
 </body>
 </html>

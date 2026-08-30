@@ -8,6 +8,8 @@ DSH Local Proxy 是一个 Node.js 本地反向代理，用于把浏览器对代�
 
 它不修改 Harness 或已安装插件文件。兼容处理只发生在代理响应阶段。代理通过登录密码保护入口，并将代理访问重新表达为上游所需的本机访问语义。
 
+代理和 Harness 的进程生命周期彼此独立。代理允许在 Harness 尚未启动时运行，并在 Harness 暂时退出或重启时继续监听。**代理不得启动、停止、重启、寻找 PID、发送信号、监督或以其他方式管理 Harness。** 禁止引入 `child_process`、`process.kill`、服务管理器调用或 Harness 可执行文件调用来实现所谓“恢复”。恢复只表示后续网络请求重新连接已由用户独立恢复的上游。
+
 项目只使用 Node.js 内置模块，没有第三方 npm 依赖。要求 Node.js 18 或更高版本。
 
 ## 请求路径
@@ -76,11 +78,23 @@ npm start
 | `UPSTREAM_HOST` | `127.0.0.1` | Harness Web 上游地址 |
 | `UPSTREAM_PORT` | `18080` | Harness Web 上游端口；必须是数字端口 |
 | `HISTORY_READ_TIMEOUT_MS` | `120000` | 历史会话列表和内容读取超时 |
+| `WEBSOCKET_HANDSHAKE_TIMEOUT_MS` | `10000` | WebSocket 上游连接及首个响应超时；建立后不设空闲超时 |
+| `UPSTREAM_STATE_TTL_MS` | `60000` | 被动上游可用性观察的有效时间 |
 | `RESPONSE_COMPRESSION` | `1` | 是否协商 Brotli/gzip |
 | `COMPRESSION_THRESHOLD_BYTES` | `1024` | 小于此大小的响应不压缩 |
 | `MAX_PATCHED_RESPONSE_BYTES` | `2097152` | 允许缓冲的 HTML/连接插件响应上限 |
 | `IMMUTABLE_STATIC_CACHE` | `1` | 是否启用可信静态资源长期缓存 |
 | `AUTH_PASSWORD` | 无 | 必须提供的代理登录密码 |
+| `AUTH_PASSWORD_B64` | 无 | 登录密码 UTF-8 字节的 base64；设置后优先于 `AUTH_PASSWORD` |
+
+## 生命周期与健康状态
+
+- `GET/HEAD /__health/live` 只报告代理进程能否处理请求，始终不连接 Harness。
+- `GET/HEAD /__health/ready` 返回最近真实代理流量产生的被动观察：`available` 为 `200`，`unavailable` 或 `unknown` 为 `503`。
+- 状态端点只返回最少状态，不返回上游地址、时间、原始网络错误或凭据。
+- 健康检查不主动探测 Harness，也不使用全局断路器；因此恢复后的第一个真实请求不会被旧状态拦截。
+- 上游在响应头之前不可达时，页面导航获得不缓存的 HTML `503`，其他请求获得稳定 JSON `503`。不会暴露 `ECONNREFUSED` 等内部信息。
+- WebSocket 在上游响应前失败时返回有效 HTTP `503`；建立后没有应用层空闲超时，上游断开会关闭两侧，由浏览器自行重连。
 
 ## 认证边界
 
@@ -129,25 +143,33 @@ npm start
 - 不要把“端口可建立 TCP 连接”解释为“端口上运行着 Harness”。启动脚本只接受用户明确输入的上游端口，不负责识别服务类型。
 - 不要修改 `/home/blyg/deepseek-harness/` 或已安装插件树；本项目的兼容逻辑必须保持在代理响应层。
 
+## 适配器架构
+
+代理核心与 Harness 解析层已经分离。Harness 更新时，路径、启动图、插件补丁、请求头语义及缓存规则应集中修改 `adapters/harness.js`，不应散布到传输核心。详细接口和升级步骤见 [`docs/harness-adapter.md`](docs/harness-adapter.md)。
+
 ## 项目文件
 
 ```text
 .
-├── .env.example       # 无真实凭据的配置参考
-├── .gitignore         # 忽略凭据、依赖和生成文件
-├── README.md          # 面向普通用户的简介和启动说明
-├── README4AI.md       # 本技术维护说明
-├── package.json       # npm 元数据、启动和测试命令
-├── server.js          # 认证、HTTP/WebSocket 转发和兼容处理
-├── server.test.js     # 自动化测试
-├── index.html         # /__local/ 诊断页
-└── start.sh           # Linux 交互式配置和启动脚本
+├── adapters/harness.js # Harness 路径、解析、补丁与语义适配
+├── lib/config.js       # 配置读取和校验
+├── lib/auth.js         # 登录、会话和代理 Cookie 隔离
+├── lib/upstream-state.js # 被动上游状态
+├── lib/http-utils.js   # 通用 HTTP 与压缩工具
+├── lib/proxy-http.js   # 通用 HTTP/SSE 传输核心
+├── lib/proxy-websocket.js # 通用 WebSocket 隧道核心
+├── docs/               # 适配器与独立服务维护说明
+├── packaging/systemd/  # 仅管理代理的 systemd 用户服务
+├── server.js           # 组合、健康路由和启动入口
+├── server.test.js      # 自动化测试
+├── index.html          # /__local/ 诊断页
+└── start.sh            # Linux 交互式配置和前台启动脚本
 ```
 
 ## 验证命令
 
 ```bash
-bash -n start.sh
+bash -n start.sh packaging/systemd/install.sh packaging/systemd/uninstall.sh
 node --check server.js
 npm test
 ```
